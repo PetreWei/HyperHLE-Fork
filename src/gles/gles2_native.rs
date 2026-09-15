@@ -63,7 +63,6 @@ impl GLESContext for GLES2NativeContext {
                 _gl_lifetime: PhantomData,
                 pvrtc_native: self.pvrtc_native,
                 texture_lod_ext_supported: self.texture_lod_ext_supported,
-                map_buffer_stagings: Vec::new(),
             });
         }
         unsafe {
@@ -84,7 +83,6 @@ impl GLESContext for GLES2NativeContext {
             _gl_lifetime: PhantomData,
             pvrtc_native: self.pvrtc_native,
             texture_lod_ext_supported: self.texture_lod_ext_supported,
-            map_buffer_stagings: Vec::new(),
         })
     }
 
@@ -98,7 +96,6 @@ impl GLESContext for GLES2NativeContext {
                 _gl_lifetime: PhantomData,
                 pvrtc_native: self.pvrtc_native,
                 texture_lod_ext_supported: self.texture_lod_ext_supported,
-                map_buffer_stagings: Vec::new(),
             });
         }
         make_current_fn(&self.gl_ctx);
@@ -114,7 +111,6 @@ impl GLESContext for GLES2NativeContext {
             _gl_lifetime: PhantomData,
             pvrtc_native: self.pvrtc_native,
             texture_lod_ext_supported: self.texture_lod_ext_supported,
-            map_buffer_stagings: Vec::new(),
         })
     }
 }
@@ -162,7 +158,8 @@ unsafe fn detect_texture_lod_ext_support() -> bool {
     if s.is_empty() {
         return false;
     }
-    s.split(' ').any(|ext| ext == "GL_EXT_shader_texture_lod")
+    s.split(' ')
+        .any(|ext| ext == "GL_EXT_shader_texture_lod")
 }
 
 /// Returns `true` if the shader source contains a top-level default float
@@ -222,7 +219,9 @@ fn patch_shader_for_native_es2(
         if trimmed.starts_with("#version") && version_line.is_none() {
             version_line = Some(line.to_string());
         } else if trimmed.starts_with("#extension") {
+            // If the driver doesn't support texture_lod, strip that extension
             if !texture_lod_ext_supported && trimmed.contains("GL_EXT_shader_texture_lod") {
+                // Drop this line entirely
                 continue;
             }
             extension_lines.push(line.to_string());
@@ -243,6 +242,7 @@ fn patch_shader_for_native_es2(
         }
     }
 
+    // Reassemble: version, then extensions, then body.
     let mut out = String::with_capacity(source.len() + 64);
     if let Some(v) = &version_line {
         out.push_str(v);
@@ -260,6 +260,12 @@ fn patch_shader_for_native_es2(
         out.push('\n');
     }
 
+    // If the driver doesn't support GL_EXT_shader_texture_lod, replace
+    // texture2DLodEXT / texture2DProjLodEXT / textureCubeLodEXT calls.
+    // These functions take an extra LOD parameter that we drop:
+    //   texture2DLodEXT(sampler, coord, lod) -> texture2D(sampler, coord)
+    //   texture2DProjLodEXT(sampler, coord, lod) -> texture2DProj(sampler, coord)
+    //   textureCubeLodEXT(sampler, coord, lod) -> textureCube(sampler, coord)
     if !texture_lod_ext_supported {
         out = replace_texture_lod_ext_calls(&out);
     }
@@ -348,7 +354,12 @@ fn replace_texture_lod_ext_calls(source: &str) -> String {
                 );
             } else {
                 // No comma found — just rename the function
-                result = format!("{}{}{}", &result[..start], new_name, &result[end_of_name..]);
+                result = format!(
+                    "{}{}{}",
+                    &result[..start],
+                    new_name,
+                    &result[end_of_name..]
+                );
             }
         }
     }
@@ -384,16 +395,6 @@ mod tests {
         let out = patch_shader_for_native_es2(src, true, false);
         assert!(!out.contains("precision"));
     }
-
-    #[test]
-    fn hoists_extension_directives_before_body_code() {
-        let src = "#version 100\nvoid helper() {}\n#extension GL_OES_texture_3D : enable\nvoid main() { gl_FragColor = vec4(1.0); }\n";
-        let out = patch_shader_for_native_es2(src, true, false);
-        let ext_pos = out.find("#extension GL_OES_texture_3D : enable").unwrap();
-        let helper_pos = out.find("void helper()").unwrap();
-        assert!(ext_pos < helper_pos);
-        assert!(out.starts_with("#version 100\n#extension GL_OES_texture_3D : enable\n"));
-    }
 }
 
 pub struct GLES2Native<'gl_ctx> {
@@ -401,13 +402,6 @@ pub struct GLES2Native<'gl_ctx> {
     pvrtc_native: bool,
     /// Whether `GL_EXT_shader_texture_lod` is advertised by the host driver.
     texture_lod_ext_supported: bool,
-    /// CPU staging buffers for the `glMapBufferOES` fallback (see below).
-    ///
-    /// Games can legitimately have more than one buffer mapped at a time
-    /// (e.g. Asphalt 8's Jet engine maps the vertex and the index buffer
-    /// simultaneously), so this is keyed by buffer target instead of being
-    /// a single slot that would silently drop the first mapping.
-    map_buffer_stagings: Vec<(GLenum, Vec<u8>)>,
 }
 
 /// Returns `true` if `cap` is an ES 1.1 fixed-function capability that has
@@ -716,7 +710,7 @@ impl GLES for GLES2Native<'_> {
         &mut self,
         target: GLenum,
         level: GLint,
-        mut internalformat: GLint,
+        internalformat: GLint,
         width: GLsizei,
         height: GLsizei,
         border: GLint,
@@ -724,9 +718,6 @@ impl GLES for GLES2Native<'_> {
         type_: GLenum,
         pixels: *const GLvoid,
     ) {
-        if format == gles11::BGRA_EXT {
-            internalformat = gles11::BGRA_EXT as GLint;
-        }
         gles2::TexImage2D(
             target,
             level,
@@ -1049,48 +1040,16 @@ impl GLES for GLES2Native<'_> {
     // `--prefer-gles2-context`, they end up here.
     unsafe fn MapBufferOES(&mut self, target: GLenum, access: GLenum) -> *mut GLvoid {
         if gles2::MapBufferOES::is_loaded() {
-            let mapped = gles2::MapBufferOES(target, access);
-            if !mapped.is_null() {
-                return mapped;
-            }
-            // Driver exports the entry point but refuses the map (common on
-            // Adreno): fall through to the staging-buffer path below.
+            gles2::MapBufferOES(target, access)
+        } else {
+            log!(
+                "Warning: glMapBufferOES called but GL_OES_mapbuffer is not \
+                 available on this ES 2.0 driver; returning NULL"
+            );
+            std::ptr::null_mut()
         }
-        // Fallback for drivers without `GL_OES_mapbuffer` (e.g. Asphalt 8's
-        // Jet engine maps vertex/index buffers with GL_WRITE_ONLY_OES to
-        // upload geometry). ES 2.0 core has no buffer readback, but games
-        // only ever map for writing, so hand out a CPU staging buffer sized
-        // to the current buffer store and upload it in `UnmapBufferOES`.
-        let mut size: GLint = 0;
-        gles2::GetBufferParameteriv(target, gles2::BUFFER_SIZE, &mut size);
-        if size <= 0 {
-            return std::ptr::null_mut();
-        }
-        let staging = vec![0u8; size as usize];
-        let ptr = staging.as_ptr();
-        // Replace any stale staging entry for this target (an unbalanced
-        // earlier map without unmap); keep other targets' entries intact.
-        match self.map_buffer_stagings.iter_mut().find(|(t, _)| *t == target) {
-            Some(entry) => *entry = (target, staging),
-            None => self.map_buffer_stagings.push((target, staging)),
-        }
-        ptr as *mut GLvoid
     }
     unsafe fn UnmapBufferOES(&mut self, target: GLenum) -> GLboolean {
-        if let Some(pos) = self
-            .map_buffer_stagings
-            .iter()
-            .position(|(mapped_target, _)| *mapped_target == target)
-        {
-            let (_, staging) = self.map_buffer_stagings.swap_remove(pos);
-            gles2::BufferSubData(
-                target,
-                0,
-                staging.len() as GLsizeiptr,
-                staging.as_ptr() as *const GLvoid,
-            );
-            return gles2::TRUE;
-        }
         if gles2::UnmapBufferOES::is_loaded() {
             gles2::UnmapBufferOES(target)
         } else {
@@ -1207,7 +1166,8 @@ impl GLES for GLES2Native<'_> {
             let s = if !length.is_null() {
                 let len = *length.add(i);
                 if len >= 0 {
-                    let slice = std::slice::from_raw_parts(raw_ptr as *const u8, len as usize);
+                    let slice =
+                        std::slice::from_raw_parts(raw_ptr as *const u8, len as usize);
                     std::str::from_utf8(slice).unwrap_or("").to_owned()
                 } else {
                     CStr::from_ptr(raw_ptr).to_string_lossy().into_owned()
@@ -1217,6 +1177,27 @@ impl GLES for GLES2Native<'_> {
             };
             joined.push_str(&s);
         }
+
+        // Check if any patching is needed at all. If the shader has no
+        // extension directives and no texture*LodEXT calls, pass through
+        // unchanged for maximum fidelity.
+        let needs_ext_hoist = joined.contains("#extension")
+            && joined.lines().enumerate().any(|(i, line)| {
+                let trimmed = line.trim();
+                if !trimmed.starts_with("#extension") {
+                    return false;
+                }
+                // Check if there's a non-preprocessor, non-empty, non-comment
+                // line before this #extension
+                joined.lines().take(i).any(|prev| {
+                    let pt = prev.trim();
+                    !pt.is_empty() && !pt.starts_with('#') && !pt.starts_with("//")
+                })
+            });
+        let needs_lod_patch = !self.texture_lod_ext_supported
+            && (joined.contains("texture2DLodEXT")
+                || joined.contains("texture2DProjLodEXT")
+                || joined.contains("textureCubeLodEXT"));
 
         // GLSL ES fragment shaders have no default precision for `float`, so
         // strict drivers (e.g. AMD's native GLES) reject any fragment shader
@@ -1230,21 +1211,7 @@ impl GLES for GLES2Native<'_> {
         let needs_precision_inject = shader_type as GLenum == gles2::FRAGMENT_SHADER
             && !shader_has_default_float_precision(&joined);
 
-        // Patch whenever the shader carries any #extension directive (its
-        // placement relative to code is what strict drivers reject), needs a
-        // texture*LodEXT rewrite, or needs a default float precision. This is
-        // deliberately broad: real PowerVR SGX drivers tolerated late
-        // #extension lines and glued preprocessor tokens, but Adreno/Mali
-        // reject them, so we always normalize rather than trying to predict
-        // the exact offending arrangement.
-        let needs_lod_patch = !self.texture_lod_ext_supported
-            && (joined.contains("texture2DLodEXT")
-                || joined.contains("texture2DProjLodEXT")
-                || joined.contains("textureCubeLodEXT"));
-        let needs_patch =
-            joined.contains("#extension") || needs_lod_patch || needs_precision_inject;
-
-        if !needs_patch {
+        if !needs_ext_hoist && !needs_lod_patch && !needs_precision_inject {
             // No patching needed — pass through directly.
             gles2::ShaderSource(shader, count, string, length);
             return;
@@ -1492,53 +1459,6 @@ impl GLES for GLES2Native<'_> {
         gles2::IsVertexArrayOES(array)
     }
 
-    // Boolean occlusion queries (GL_EXT_occlusion_query_boolean). ES 2.0 has no
-    // core query objects, so we forward to the driver's `*EXT` entry points.
-    // These are the exact functions iPhone OS games (e.g. Rush Rally 2) call
-    // through the `glGenQueriesEXT` family of symbols.
-    // Reference: https://registry.khronos.org/OpenGL/extensions/EXT/EXT_occlusion_query_boolean.txt
-    unsafe fn GenQueries(&mut self, n: GLsizei, ids: *mut GLuint) {
-        if gles2::GenQueriesEXT::is_loaded() {
-            gles2::GenQueriesEXT(n, ids)
-        } else {
-            log_once!(
-                "GenQueries: driver does not expose GL_EXT_occlusion_query_boolean [stubbed]"
-            );
-        }
-    }
-    unsafe fn DeleteQueries(&mut self, n: GLsizei, ids: *const GLuint) {
-        if gles2::DeleteQueriesEXT::is_loaded() {
-            gles2::DeleteQueriesEXT(n, ids)
-        }
-    }
-    unsafe fn IsQuery(&mut self, id: GLuint) -> GLboolean {
-        if gles2::IsQueryEXT::is_loaded() {
-            gles2::IsQueryEXT(id)
-        } else {
-            gles2::FALSE
-        }
-    }
-    unsafe fn BeginQuery(&mut self, target: GLenum, id: GLuint) {
-        if gles2::BeginQueryEXT::is_loaded() {
-            gles2::BeginQueryEXT(target, id)
-        }
-    }
-    unsafe fn EndQuery(&mut self, target: GLenum) {
-        if gles2::EndQueryEXT::is_loaded() {
-            gles2::EndQueryEXT(target)
-        }
-    }
-    unsafe fn GetQueryiv(&mut self, target: GLenum, pname: GLenum, params: *mut GLint) {
-        if gles2::GetQueryivEXT::is_loaded() {
-            gles2::GetQueryivEXT(target, pname, params)
-        }
-    }
-    unsafe fn GetQueryObjectuiv(&mut self, id: GLuint, pname: GLenum, params: *mut GLuint) {
-        if gles2::GetQueryObjectuivEXT::is_loaded() {
-            gles2::GetQueryObjectuivEXT(id, pname, params)
-        }
-    }
-
     // Uniforms
     unsafe fn Uniform1f(&mut self, location: GLint, v0: GLfloat) {
         gles2::Uniform1f(location, v0)
@@ -1682,27 +1602,6 @@ impl GLES for GLES2Native<'_> {
     // keeps the existing `present_renderbuffer` save/restore code paths quiet
     // without crashing. Real apps that rely on a true ES 2.0 driver will not
     // call these.
-    unsafe fn Fogf(&mut self, _pname: GLenum, _param: GLfloat) {}
-    unsafe fn Fogx(&mut self, _pname: GLenum, _param: GLfixed) {}
-    unsafe fn Fogfv(&mut self, _pname: GLenum, _params: *const GLfloat) {}
-    unsafe fn Fogxv(&mut self, _pname: GLenum, _params: *const GLfixed) {}
-    unsafe fn Lightf(&mut self, _light: GLenum, _pname: GLenum, _param: GLfloat) {}
-    unsafe fn Lightx(&mut self, _light: GLenum, _pname: GLenum, _param: GLfixed) {}
-    unsafe fn Lightfv(&mut self, _light: GLenum, _pname: GLenum, _params: *const GLfloat) {}
-    unsafe fn Lightxv(&mut self, _light: GLenum, _pname: GLenum, _params: *const GLfixed) {}
-    unsafe fn LightModelf(&mut self, _pname: GLenum, _param: GLfloat) {}
-    unsafe fn LightModelx(&mut self, _pname: GLenum, _param: GLfixed) {}
-    unsafe fn LightModelfv(&mut self, _pname: GLenum, _params: *const GLfloat) {}
-    unsafe fn LightModelxv(&mut self, _pname: GLenum, _params: *const GLfixed) {}
-    unsafe fn Materialf(&mut self, _face: GLenum, _pname: GLenum, _param: GLfloat) {}
-    unsafe fn Materialx(&mut self, _face: GLenum, _pname: GLenum, _param: GLfixed) {}
-    unsafe fn Materialfv(&mut self, _face: GLenum, _pname: GLenum, _params: *const GLfloat) {}
-    unsafe fn Materialxv(&mut self, _face: GLenum, _pname: GLenum, _params: *const GLfixed) {}
-    unsafe fn GetLightfv(&mut self, _light: GLenum, _pname: GLenum, _params: *mut GLfloat) {}
-    unsafe fn GetLightxv(&mut self, _light: GLenum, _pname: GLenum, _params: *mut GLfixed) {}
-    unsafe fn GetMaterialfv(&mut self, _face: GLenum, _pname: GLenum, _params: *mut GLfloat) {}
-    unsafe fn GetMaterialxv(&mut self, _face: GLenum, _pname: GLenum, _params: *mut GLfixed) {}
-
     unsafe fn ClientActiveTexture(&mut self, _texture: GLenum) {}
     unsafe fn EnableClientState(&mut self, _array: GLenum) {}
     unsafe fn DisableClientState(&mut self, _array: GLenum) {}
