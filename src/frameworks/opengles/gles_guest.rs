@@ -430,7 +430,24 @@ fn glGetString(env: &mut Environment, name: GLenum) -> ConstPtr<GLubyte> {
             // skinning CPU-side (see gles1_on_gl2's skin_vertices). Games such
             // as LEGO Ninjago: Rise of the Snakes feature-test this string and
             // use the palette path for skinned character meshes.
-            gles11::EXTENSIONS => b"GL_APPLE_texture_max_level GL_EXT_discard_framebuffer GL_EXT_texture_filter_anisotropic GL_EXT_texture_lod_bias GL_IMG_read_format GL_IMG_texture_compression_pvrtc GL_IMG_texture_format_BGRA8888 GL_OES_blend_subtract GL_OES_compressed_paletted_texture GL_OES_depth24 GL_OES_draw_texture GL_OES_framebuffer_object GL_OES_mapbuffer GL_OES_matrix_palette GL_OES_point_size_array GL_OES_point_sprite GL_OES_read_format GL_OES_rgb8_rgba8 GL_OES_texture_mirrored_repeat GL_OES_vertex_array_object ",
+            gles11::EXTENSIONS => {
+                // Monster Hunter Dynamic Hunting 1.03 switches into the
+                // GL_OES_matrix_palette renderer when this extension is
+                // advertised. HyperHLE's current CPU-side palette emulation
+                // still produces a black 3D scene for this title on the
+                // GLES1-on-GL2 backend. Hide the extension only for MHDH so
+                // the game selects its non-palette fallback renderer while we
+                // preserve matrix-palette support for titles that already rely
+                // on the emulation path (for example Ninjago).
+                if env.bundle.bundle_identifier() == "jp.co.capcom.monhunipus" {
+                    log_once!(
+                        "MHDH compatibility: hiding GL_OES_matrix_palette to force the guest fallback renderer"
+                    );
+                    b"GL_APPLE_texture_max_level GL_EXT_discard_framebuffer GL_EXT_texture_filter_anisotropic GL_EXT_texture_lod_bias GL_IMG_read_format GL_IMG_texture_compression_pvrtc GL_IMG_texture_format_BGRA8888 GL_OES_blend_subtract GL_OES_compressed_paletted_texture GL_OES_depth24 GL_OES_draw_texture GL_OES_framebuffer_object GL_OES_mapbuffer GL_OES_point_size_array GL_OES_point_sprite GL_OES_read_format GL_OES_rgb8_rgba8 GL_OES_texture_mirrored_repeat GL_OES_vertex_array_object "
+                } else {
+                    b"GL_APPLE_texture_max_level GL_EXT_discard_framebuffer GL_EXT_texture_filter_anisotropic GL_EXT_texture_lod_bias GL_IMG_read_format GL_IMG_texture_compression_pvrtc GL_IMG_texture_format_BGRA8888 GL_OES_blend_subtract GL_OES_compressed_paletted_texture GL_OES_depth24 GL_OES_draw_texture GL_OES_framebuffer_object GL_OES_mapbuffer GL_OES_matrix_palette GL_OES_point_size_array GL_OES_point_sprite GL_OES_read_format GL_OES_rgb8_rgba8 GL_OES_texture_mirrored_repeat GL_OES_vertex_array_object "
+                }
+            },
             _ => b"Unknown",
         }
     } else {
