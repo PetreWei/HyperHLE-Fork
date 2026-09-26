@@ -188,10 +188,14 @@ pub const CLASSES: ClassExports = objc_classes! {
         host.alias        = alias;
         host.display_name = display;
         host.friends      = friends;
+        host.authenticated = env.options.game_center_authenticated;
     }
 
     State::get(env).local_player = Some(player);
-    log!("GKLocalPlayer localPlayer: singleton created");
+    log!(
+        "GKLocalPlayer localPlayer: singleton created (authenticated={})",
+        env.options.game_center_authenticated
+    );
     player
 }
 
@@ -344,7 +348,11 @@ pub const CLASSES: ClassExports = objc_classes! {
 
     post_auth_change_notification(env);
 
-    let error = make_not_authenticated_error(env);
+    let error = if env.objc.borrow::<GKLocalPlayerHostObject>(this).authenticated {
+        nil
+    } else {
+        make_not_authenticated_error(env)
+    };
     invoke_error_block(env, handler, error);
     release(env, handler);
 }
@@ -403,7 +411,11 @@ pub const CLASSES: ClassExports = objc_classes! {
         return;
     }
     post_auth_change_notification(env);
-    let error = make_not_authenticated_error(env);
+    let error = if env.objc.borrow::<GKLocalPlayerHostObject>(this).authenticated {
+        nil
+    } else {
+        make_not_authenticated_error(env)
+    };
     invoke_vc_error_block(env, handler, nil, error);
 }
 

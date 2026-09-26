@@ -201,6 +201,9 @@ pub struct Options {
     /// Apps that are ES 2.0-only will fail to create a context with this set.
     pub force_gles1_context: bool,
     pub network_access: bool,
+    /// Report a local Game Center player as signed in, without providing
+    /// online Game Center services. Some games require this at startup.
+    pub game_center_authenticated: bool,
     pub popup_errors: bool,
     pub dumping_options: DumpingOptions,
     pub dumping_file: PathBuf,
@@ -302,6 +305,7 @@ impl Default for Options {
                 })
                 .unwrap_or(false),
             network_access: false,
+            game_center_authenticated: false,
             popup_errors: true,
             dumping_options: Default::default(),
             dumping_file: crate::paths::user_data_base_path().join("DUMP.txt"),
@@ -558,6 +562,10 @@ impl Options {
             std::env::set_var("TOUCHHLE_FORCE_GLES1_CONTEXT", "1");
         } else if arg == "--allow-network-access" {
             self.network_access = true;
+        } else if arg == "--game-center-authenticated" {
+            self.game_center_authenticated = true;
+        } else if arg == "--no-game-center-authenticated" {
+            self.game_center_authenticated = false;
         } else if arg == "--no-error-popup" {
             self.popup_errors = false;
         } else if let Some(values) = arg.strip_prefix("--dump=") {
