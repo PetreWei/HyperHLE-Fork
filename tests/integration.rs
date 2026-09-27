@@ -312,8 +312,10 @@ fn test_app() -> Result<(), Box<dyn Error>> {
     // Build the stub libraries and ensure TestApp will link to them.
 
     for (dylib_path, stub_src_path) in files_to_compile {
-        if dylib_path.starts_with("/.touchHLE") {
-            // skip the fake app picker library
+        if !dylib_path.starts_with("/usr/lib/lib")
+            && !dylib_path.starts_with("/System/Library/Frameworks/")
+        {
+            // TestApp only links the public system libraries and frameworks.
             continue;
         }
         let compile_args = [
@@ -380,5 +382,10 @@ fn test_app() -> Result<(), Box<dyn Error>> {
     }
 
     // Finally, build TestApp itself.
-    run_test_app(&tests_dir, "TestApp", &extra_compile_args, &[])
+    run_test_app(
+        &tests_dir,
+        "TestApp",
+        &extra_compile_args,
+        &["--game-center-authenticated"],
+    )
 }

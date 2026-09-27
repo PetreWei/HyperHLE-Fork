@@ -65,6 +65,15 @@
 
 extern NSString *const NSDefaultRunLoopMode;
 
+@interface GKLocalPlayer : NSObject
++ (instancetype)localPlayer;
+- (BOOL)isAuthenticated;
+@end
+
+int test_GKLocalPlayer_authenticated(void) {
+  return [[GKLocalPlayer localPlayer] isAuthenticated] ? 0 : -1;
+}
+
 static int perform_selector_on_main_thread_calls;
 
 @interface PerformSelectorOnMainThreadProbe : NSObject
@@ -6388,6 +6397,7 @@ struct {
     FUNC_DEF(test_NSNotificationCenter_addObserver_nilName_withObject),
     FUNC_DEF(test_NSNotificationCenter_addObserver_nilName_removeObserver),
     FUNC_DEF(test_performSelectorOnMainThread_mainThreadDeferred),
+    FUNC_DEF(test_GKLocalPlayer_authenticated),
     FUNC_DEF(test_UIApplication_canOpenURL_own_registered_scheme),
     FUNC_DEF(test_NSBundle_subbundleCacheRetainsAutoreleasedBundle),
 };
